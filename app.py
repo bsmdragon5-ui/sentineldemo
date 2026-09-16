@@ -1,73 +1,149 @@
 """
 Sentinel Live Demo — Streamlit frontend for the DriftGuard / Sentinel API
 ===========================================================================
-A click-through demo for investors and prospective customers, backed by
-LIVE calls to your deployed HuggingFace Space — nothing here is mocked.
-Every screenshot/GIF you'd want for the deck can be produced by walking
-through this app against the real API.
+StrataForge3-branded, share-link-safe: the API key is read from Streamlit
+secrets and used SERVER-SIDE only. Anyone opening the deployed link never
+sees the key, and it's never sent to their browser — the HTTP calls to
+your API happen from Streamlit's own servers, not the visitor's machine.
 
-Two halves, matching what the API actually offers:
-  1. Full walkthrough  — score transactions, run drift detection, optimize
-     a threshold, pull a compliance report, verify the tamper-evidence chain.
-     Uses the built-in demo fraud model (or your real model, if the Space
-     has one loaded from HF_REPO).
-  2. Multi-tenant       — onboard a "customer" model_id with its own
-     reference data, run an isolated drift check, see its own dashboard/
-     alerts/compliance report. Demonstrates the isolation guarantee
-     covered by test_multitenancy.py.
+SECURITY NOTE (read before sharing widely): this demo uses whatever key
+you put in SENTINEL_API_KEY. That key can call every endpoint your API
+exposes. Hiding it from the UI stops a casual visitor from *seeing* it,
+but doesn't scope down what it can *do*. If you want a genuinely
+lower-privilege key for public sharing (recommended before wide
+distribution), that requires adding role/scope support to main.py's auth
+— ask if you want that built. Until then, treat this link as "safe to
+click through," not "safe against a determined, technical visitor."
+
+ISOLATION NOTE: the "Drift Detection" and "Threshold Optimization" pages
+operate on a dedicated tenant (`public_demo`, via the multi-tenant
+/tenants/{model_id}/... endpoints) rather than the shared single-tenant
+demo model. This means visitors playing with this public link cannot
+corrupt the shared demo model's live threshold or reference data out
+from under you (or each other) mid-demo. "Score Transactions" still uses
+the single-tenant /predict endpoints, since there's no per-tenant scoring
+endpoint (tenants bring their own precomputed scores) — this is lower
+risk since it doesn't mutate threshold/reference state, only appends to
+the shared alert/compliance log.
 
 Run locally:
-    pip install streamlit requests
+    pip install streamlit requests pillow
     streamlit run streamlit_app.py
 
 Deploy on Streamlit Community Cloud:
-    Push this repo to GitHub, point share.streamlit.io at it, and set two
-    secrets in the app's Settings -> Secrets:
-        SENTINEL_API_BASE = "https://<your-space>.hf.space"
-        SENTINEL_API_KEY  = "<the API_KEY you set in the HF Space secrets>"
-    (Both can also be typed into the sidebar at runtime instead — secrets
-    just save you re-typing the key every time you open the app.)
+    Push this file, requirements-streamlit.txt, and the assets/ folder
+    (logo) to GitHub. Point share.streamlit.io at it. In the app's
+    Settings -> Secrets, set:
+        SENTINEL_API_BASE = "https://your-username-your-space.hf.space"
+        SENTINEL_API_KEY  = "the-API_KEY-you-set-in-your-HF-Space-secrets"
+    That's it — the deployed link needs no key entry from visitors.
 """
 
 from __future__ import annotations
-import json
+import random
 import time
-from typing import Optional
+from pathlib import Path
 
 import requests
 import streamlit as st
 
+# ─────────────────────────────────────────────────────────────
+# BRAND — approximate StrataForge3 palette (from strataforge3.com /
+# the logo mark). Tweak hex values if you want a pixel-exact match —
+# these were read off screenshots, not your actual CSS.
+# ─────────────────────────────────────────────────────────────
+
+NAVY_DARK   = "#141a3d"
+NAVY_DARKER = "#0d1129"
+ORANGE      = "#e8642c"
+ORANGE_LT   = "#f0a35c"
+LAVENDER    = "#b4aede"
+WHITE       = "#f5f5fa"
+
+LOGO_PATH = Path(__file__).parent / "assets" / "strataforge3-logo-mark.png"
+
 st.set_page_config(
-    page_title="Sentinel — Live Demo",
-    page_icon="🛰️",
+    page_title="StrataForge3 — Sentinel Live Demo",
+    page_icon=str(LOGO_PATH) if LOGO_PATH.exists() else "🛰️",
     layout="wide",
 )
 
-DEFAULT_BASE_URL = "https://syedascientist72-mlops-maci.hf.space"
+st.markdown(f"""
+<style>
+    .stApp {{
+        background-color: {NAVY_DARKER};
+    }}
+    section[data-testid="stSidebar"] {{
+        background-color: {NAVY_DARK};
+        border-right: 1px solid #2a2f5c;
+    }}
+    h1, h2, h3 {{
+        color: {WHITE} !important;
+        font-family: 'Inter', -apple-system, sans-serif;
+    }}
+    p, label, .stMarkdown {{
+        color: {WHITE};
+    }}
+    .stButton > button[kind="primary"] {{
+        background-color: {ORANGE};
+        border-color: {ORANGE};
+        color: white;
+        font-weight: 600;
+    }}
+    .stButton > button[kind="primary"]:hover {{
+        background-color: {ORANGE_LT};
+        border-color: {ORANGE_LT};
+    }}
+    .stButton > button:not([kind="primary"]) {{
+        background-color: transparent;
+        border: 1px solid {LAVENDER};
+        color: {LAVENDER};
+    }}
+    div[data-testid="stMetric"] {{
+        background-color: {NAVY_DARK};
+        border: 1px solid #2a2f5c;
+        border-radius: 8px;
+        padding: 12px;
+    }}
+    div[data-testid="stMetricLabel"] {{
+        color: {LAVENDER} !important;
+    }}
+    .demo-caption {{
+        color: {LAVENDER};
+        font-size: 0.85rem;
+    }}
+    a {{ color: {ORANGE_LT} !important; }}
+</style>
+""", unsafe_allow_html=True)
 
 
 # ─────────────────────────────────────────────────────────────
-# CONNECTION / SESSION STATE
+# CONNECTION — secrets only. No key input is ever rendered when
+# secrets are configured, so a shared deployed link never asks a
+# visitor for credentials and never puts one in their browser.
 # ─────────────────────────────────────────────────────────────
 
-def _secret_or_default(key: str, default: str = "") -> str:
+def _secret(key: str, default: str = "") -> str:
     try:
         return st.secrets.get(key, default)  # type: ignore[union-attr]
     except Exception:
         return default
 
 
+_SECRET_BASE = _secret("SENTINEL_API_BASE")
+_SECRET_KEY = _secret("SENTINEL_API_KEY")
+_USING_SECRETS = bool(_SECRET_BASE and _SECRET_KEY)
+
 if "base_url" not in st.session_state:
-    st.session_state.base_url = _secret_or_default("SENTINEL_API_BASE", DEFAULT_BASE_URL)
+    st.session_state.base_url = _SECRET_BASE
 if "api_key" not in st.session_state:
-    st.session_state.api_key = _secret_or_default("SENTINEL_API_KEY", "")
+    st.session_state.api_key = _SECRET_KEY
+
+DEMO_TENANT_ID = "public_demo"  # dedicated, isolated tenant for this shared demo
 
 
 def api(method: str, path: str, auth: bool = True, timeout: int = 30, **kwargs):
-    """Thin wrapper around requests that returns (ok, status_code, json_or_text).
-    Never raises — every caller renders success/failure inline instead of
-    the app crashing mid-demo, which matters a lot when the audience is an
-    investor watching over your shoulder."""
+    """Never raises — every caller renders success/failure inline."""
     url = st.session_state.base_url.rstrip("/") + path
     headers = kwargs.pop("headers", {})
     if auth and st.session_state.api_key:
@@ -84,10 +160,6 @@ def api(method: str, path: str, auth: bool = True, timeout: int = 30, **kwargs):
 
 
 def wake_and_check() -> tuple[bool, str]:
-    """HF Spaces on the free tier sleep after inactivity — the first call
-    after a sleep can take 30-60s while it boots. This gives clear feedback
-    instead of the UI looking hung, and matches what the app's own
-    lifespan startup does (restore DBs, reload registry, load model)."""
     ok, status, body = api("GET", "/health", auth=False, timeout=5)
     if ok:
         return True, "awake"
@@ -101,15 +173,10 @@ def wake_and_check() -> tuple[bool, str]:
 
 
 # ─────────────────────────────────────────────────────────────
-# SYNTHETIC DATA HELPERS (for demoing without needing real customer data)
+# SYNTHETIC DATA HELPERS
 # ─────────────────────────────────────────────────────────────
 
-import random
-
-
 def synth_transaction(shift: float = 0.0) -> dict:
-    """One fake transaction matching the demo model's expected raw fields.
-    `shift` moves the distribution — used to manufacture visible drift."""
     tx = {f"V{i}": random.gauss(0 + shift, 1.0) for i in range(1, 29)}
     tx["Amount"] = max(0.0, random.gauss(150 + shift * 50, 80))
     return tx
@@ -119,9 +186,7 @@ def synth_batch(n: int, shift: float = 0.0) -> list[dict]:
     return [synth_transaction(shift) for _ in range(n)]
 
 
-def synth_scores(n: int, model_id: str = "demo") -> tuple[list[int], list[float]]:
-    """Fake labels + probabilities for threshold optimization / reference
-    registration, shaped like a realistic low-base-rate fraud problem."""
+def synth_scores(n: int) -> tuple[list[int], list[float]]:
     labels = [1 if random.random() < 0.03 else 0 for _ in range(n)]
     probs = [
         min(1.0, max(0.0, random.gauss(0.8, 0.15))) if y == 1
@@ -132,21 +197,28 @@ def synth_scores(n: int, model_id: str = "demo") -> tuple[list[int], list[float]
 
 
 # ─────────────────────────────────────────────────────────────
-# SIDEBAR — connection config, shown on every page
+# SIDEBAR
 # ─────────────────────────────────────────────────────────────
 
 with st.sidebar:
-    st.title("🛰️ Sentinel")
-    st.caption("Live demo — every action below hits your real API.")
+    if LOGO_PATH.exists():
+        st.image(str(LOGO_PATH), width=64)
+    st.markdown(f"<h2 style='color:{WHITE};margin-top:0;'>Sentinel</h2>", unsafe_allow_html=True)
+    st.markdown(
+        "<p class='demo-caption'>Live demo — every action below hits your real API.</p>",
+        unsafe_allow_html=True,
+    )
 
-    st.session_state.base_url = st.text_input(
-        "API base URL", value=st.session_state.base_url,
-        help="Your HF Space URL, e.g. https://your-username-your-space.hf.space",
-    )
-    st.session_state.api_key = st.text_input(
-        "API key (Bearer token)", value=st.session_state.api_key, type="password",
-        help="The API_KEY secret set in your HF Space's Settings -> Variables & Secrets.",
-    )
+    if _USING_SECRETS:
+        st.markdown(
+            "<p class='demo-caption'>🔒 Connected — credentials configured by the demo owner, "
+            "never exposed to your browser.</p>",
+            unsafe_allow_html=True,
+        )
+    else:
+        st.info("No secrets configured — enter connection details for local testing.")
+        st.session_state.base_url = st.text_input("API base URL", value=st.session_state.base_url)
+        st.session_state.api_key = st.text_input("API key (Bearer token)", value=st.session_state.api_key, type="password")
 
     if st.button("Check connection", use_container_width=True):
         awake, msg = wake_and_check()
@@ -169,12 +241,12 @@ with st.sidebar:
         ],
     )
     st.divider()
-    st.caption("strataforge3.com")
+    st.markdown("<p class='demo-caption'>strataforge3.com</p>", unsafe_allow_html=True)
 
 
 def require_key():
     if not st.session_state.api_key:
-        st.warning("Enter your API key in the sidebar to use protected endpoints.")
+        st.warning("No API key configured. If you're the demo owner, set SENTINEL_API_KEY in Secrets.")
         st.stop()
 
 
@@ -223,8 +295,10 @@ elif page == "Score Transactions":
     st.header("Score Transactions")
     st.write(
         "Calls `/predict` and `/predict/batch` against the model currently "
-        "loaded in the Space (real model if `HF_REPO` has one, otherwise "
-        "the built-in demo model)."
+        "loaded in the Space. This is the one page that uses the shared "
+        "single-tenant model rather than the isolated demo tenant — scoring "
+        "doesn't mutate the threshold or reference data, so it's low-risk "
+        "to share."
     )
 
     tab_single, tab_batch = st.tabs(["Single transaction", "Batch"])
@@ -264,12 +338,13 @@ elif page == "Score Transactions":
 
 
 # ─────────────────────────────────────────────────────────────
-# PAGE: DRIFT DETECTION
+# PAGE: DRIFT DETECTION — now on the isolated public_demo tenant
 # ─────────────────────────────────────────────────────────────
 
 elif page == "Drift Detection":
     require_key()
     st.header("Drift Detection (PSI + KS-test)")
+    st.caption(f"Running against isolated tenant `{DEMO_TENANT_ID}` — cannot affect the shared demo model or any other tenant.")
     st.write(
         "Set a reference baseline, then send production-like data that's "
         "deliberately shifted, and watch PSI cross the WARNING/CRITICAL "
@@ -280,7 +355,9 @@ elif page == "Drift Detection":
     if st.button("Set reference data"):
         ref_data = synth_batch(ref_size, shift=0.0)
         labels = [1 if random.random() < 0.02 else 0 for _ in range(ref_size)]
-        ok, status, body = api("POST", "/reference", json={"data": ref_data, "labels": labels})
+        ok, status, body = api("POST", f"/tenants/{DEMO_TENANT_ID}/reference", json={
+            "data": ref_data, "labels": labels, "display_name": "Public Demo (shared visitors)",
+        })
         if ok:
             st.success(f"Reference set: {body['rows']} rows, {len(body['features'])} features.")
         else:
@@ -294,7 +371,7 @@ elif page == "Drift Detection":
     prod_size = st.slider("Production batch size", 50, 1000, 300)
     if st.button("Run drift report", type="primary"):
         prod_data = synth_batch(prod_size, shift=shift)
-        ok, status, body = api("POST", "/drift/report", json={"transactions": prod_data})
+        ok, status, body = api("POST", f"/tenants/{DEMO_TENANT_ID}/drift/report", json={"transactions": prod_data})
         if ok:
             level_color = {"OK": "🟢", "INFO": "🔵", "WARNING": "🟡", "CRITICAL": "🔴"}
             st.metric(
@@ -302,24 +379,24 @@ elif page == "Drift Detection":
                 f"{level_color.get(body['alert_level'], '⚪')} {body['alert_level']}",
                 f"mean PSI = {body['mean_psi']}",
             )
-            st.write(f"**Recommended action:** {body['recommended_action']}")
             if body["critical_features"]:
                 st.error(f"Critical features: {', '.join(body['critical_features'])}")
             if body["warning_features"]:
                 st.warning(f"Warning features: {', '.join(body['warning_features'])}")
             with st.expander("Per-feature PSI/KS detail"):
-                st.json(body["per_feature"])
+                st.json(body["features"])
         else:
-            st.error(f"Failed ({status}): {body}")
+            st.error(f"Failed ({status}): {body} — if this is a 404, click 'Set reference data' above first.")
 
 
 # ─────────────────────────────────────────────────────────────
-# PAGE: THRESHOLD OPTIMIZATION
+# PAGE: THRESHOLD OPTIMIZATION — also on the isolated demo tenant
 # ─────────────────────────────────────────────────────────────
 
 elif page == "Threshold Optimization":
     require_key()
     st.header("Cost-Sensitive Threshold Optimization")
+    st.caption(f"Running against isolated tenant `{DEMO_TENANT_ID}` — does not touch the shared demo model's live threshold.")
     st.latex(r"\theta^* = \arg\max_\theta \; \text{Recall}(\theta) - \lambda \cdot \text{FPR}(\theta)")
 
     n = st.slider("Number of labeled samples", 50, 2000, 500)
@@ -329,7 +406,7 @@ elif page == "Threshold Optimization":
     )
     if st.button("Optimize threshold", type="primary"):
         labels, probs = synth_scores(n)
-        ok, status, body = api("POST", "/threshold/optimize", json={
+        ok, status, body = api("POST", f"/tenants/{DEMO_TENANT_ID}/threshold/optimize", json={
             "labels": labels, "probabilities": probs, "lambda_cost": lam,
         })
         if ok:
@@ -337,7 +414,6 @@ elif page == "Threshold Optimization":
             c1.metric("Optimal threshold", body["optimal_threshold"])
             c2.metric("Recall at optimum", f"{body['recall_at_optimal']:.2%}")
             c3.metric("FPR at optimum", f"{body['fpr_at_optimal']:.2%}")
-            st.info(body["message"])
         else:
             st.error(f"Failed ({status}): {body}")
 
@@ -351,8 +427,7 @@ elif page == "Compliance Report":
     st.header("Regulatory Evidence & Compliance Report")
     st.write(
         "Pulls a structured, article-mapped report from the persistent, "
-        "hash-chained evidence log — not the in-memory alert list. This is "
-        "what turns raw monitoring events into audit documentation."
+        "hash-chained evidence log — not the in-memory alert list."
     )
 
     framework = st.selectbox("Framework", ["eu_ai_act", "dora"])
@@ -396,9 +471,7 @@ elif page == "Multi-Tenant Onboarding":
     st.header("Onboard a Customer Model")
     st.write(
         "A customer brings their OWN already-computed scores/labels/features "
-        "— Sentinel monitors and documents them without hosting their model. "
-        "This is the generalizable part of the product (fraud, credit, AML, "
-        "insurance, churn, LLM-triage — any scored model)."
+        "— Sentinel monitors and documents them without hosting their model."
     )
 
     with st.form("onboard_form"):
@@ -442,19 +515,17 @@ elif page == "Multi-Tenant Isolation Proof":
     st.write(
         "Registers two independent tenants with very different reference "
         "distributions, drifts one of them hard, and shows their dashboards "
-        "and alert logs side by side — demonstrating that one customer's "
-        "data and alerts never bleed into another's. (Backed by "
-        "`test_multitenancy.py` in the repo.)"
+        "and alert logs side by side. (Backed by `test_multitenancy.py` in the repo.)"
     )
 
     if st.button("Run isolation demo", type="primary"):
         with st.spinner("Registering tenant_alpha and tenant_beta..."):
-            ok_a, _, body_a = api("POST", "/tenants/demo_tenant_alpha/reference", json={
+            api("POST", "/tenants/demo_tenant_alpha/reference", json={
                 "data": synth_batch(200, shift=0.0),
                 "labels": [1 if random.random() < 0.02 else 0 for _ in range(200)],
                 "display_name": "Demo Tenant Alpha",
             })
-            ok_b, _, body_b = api("POST", "/tenants/demo_tenant_beta/reference", json={
+            api("POST", "/tenants/demo_tenant_beta/reference", json={
                 "data": synth_batch(200, shift=0.0),
                 "labels": [1 if random.random() < 0.02 else 0 for _ in range(200)],
                 "display_name": "Demo Tenant Beta",
@@ -462,10 +533,10 @@ elif page == "Multi-Tenant Isolation Proof":
 
         with st.spinner("Drifting alpha hard, leaving beta untouched..."):
             api("POST", "/tenants/demo_tenant_alpha/drift/report", json={
-                "transactions": synth_batch(200, shift=3.0),  # big shift -> should alert
+                "transactions": synth_batch(200, shift=3.0),
             })
             api("POST", "/tenants/demo_tenant_beta/drift/report", json={
-                "transactions": synth_batch(200, shift=0.0),  # no shift -> should stay quiet
+                "transactions": synth_batch(200, shift=0.0),
             })
 
         col1, col2 = st.columns(2)
