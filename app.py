@@ -35,7 +35,7 @@ Deploy on Streamlit Community Cloud:
     (logo) to GitHub. Point share.streamlit.io at it. In the app's
     Settings -> Secrets, set:
         SENTINEL_API_BASE = "https://your-username-your-space.hf.space"
-        SENTINEL_API_KEY  = "the-API_KEY-you-set-in-your-HF-Space-secrets"
+        SENTINEL_API_KEY  = "my-secret-api-key-1317"
     That's it — the deployed link needs no key entry from visitors.
 """
 
