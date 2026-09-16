@@ -15,10 +15,8 @@ pre-fill them via secrets).
 
 ## Deploy on Streamlit Community Cloud
 
-1. Push this repo to GitHub (this file, `streamlit_app.py`, and
-   `requirements-streamlit.txt` at minimum — the rest of the repo, i.e.
-   `main.py`/`tenants.py`/`compliance.py`, doesn't need to be in the same
-   repo as the Streamlit app, though it can be).
+1. Push this repo to GitHub — `streamlit_app.py`, `requirements-streamlit.txt`,
+   and the `assets/` folder (the StrataForge3 logo) at minimum.
 2. Go to [share.streamlit.io](https://share.streamlit.io), connect the repo,
    and set **Main file path** to `streamlit_app.py`.
 3. In the app's **Settings → Secrets**, add:
@@ -28,6 +26,37 @@ pre-fill them via secrets).
    ```
    (Find your Space's exact URL on its HF page — it's the `https://...hf.space`
    link that appears once the Space is running.)
+
+## Sharing the link safely
+
+**The API key never reaches the visitor's browser.** Once secrets are
+configured, the app doesn't render an API key input field at all —
+anyone who opens your deployed link can use the demo, but the key itself
+lives only in Streamlit Cloud's server-side secrets store. The HTTP
+calls to your API happen from Streamlit's servers, not the visitor's
+machine, so there's nothing to find even in browser dev tools.
+
+**What this does NOT do: scope down what the key can do.** The key you
+put in `SENTINEL_API_KEY` is a full-access admin key — same one your
+Space's own `API_KEY` secret uses. Hiding it from the UI stops a casual
+visitor from seeing it; it doesn't stop a determined, technical visitor
+from doing anything your API allows, since the app itself will happily
+forward requests. Before sharing this link widely (versus a handful of
+known investors), consider:
+- Minting a **separate key** just for this demo (so if it's ever
+  compromised, your production key isn't), and
+- Adding proper role/scope support to `main.py`'s auth if you want a
+  genuinely read-only or rate-limited public demo key — this isn't
+  built yet and would need real backend changes, not just a Streamlit
+  tweak.
+
+**Isolation:** the "Drift Detection" and "Threshold Optimization" pages
+run against a dedicated `public_demo` tenant via the multi-tenant API,
+not the shared single-tenant fraud model — so visitors playing with the
+public link can't change the live demo model's threshold or reference
+data out from under you mid-pitch. "Score Transactions" still uses the
+shared model (no per-tenant scoring endpoint exists), but scoring alone
+doesn't mutate the threshold, so the blast radius there is much smaller.
 
 ## What's in the demo
 
