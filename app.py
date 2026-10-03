@@ -108,6 +108,16 @@ def api(method: str, path: str, auth: bool = True, timeout: int = 30, **kwargs):
         return False, None, str(e)
 
 
+def friendly_error(status) -> str:
+    """Investor-safe error text. Never shows raw bodies, HTML, or stack traces."""
+    if status is None:
+        return ("The live service isn't responding right now. It may be waking up, "
+                "so please try again in a moment.")
+    if status in (401, 403):
+        return "The demo's connection isn't authorized. Please let the demo owner know."
+    return f"The service returned an unexpected response (code {status}). Please try again."
+
+
 def wake_and_check() -> tuple[bool, str]:
     ok, status, body = api("GET", "/health", auth=False, timeout=5)
     if ok:
@@ -119,6 +129,30 @@ def wake_and_check() -> tuple[bool, str]:
             if ok:
                 return True, "woke up"
     return False, f"still unreachable (last status: {status})"
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def _is_live(base_url: str) -> bool:
+    ok, _, _ = api("GET", "/health", auth=False, timeout=5)
+    return ok
+
+
+def ensure_live():
+    """Wake the backend if needed; otherwise show a calm message and stop."""
+    if _is_live(st.session_state.base_url):
+        return
+    awake, _ = wake_and_check()
+    if awake:
+        _is_live.clear()
+        return
+    st.info("The live engine is warming up. Give it about a minute, then refresh this page.")
+    st.stop()
+
+
+def require_key():
+    if not st.session_state.api_key:
+        st.warning("No API key configured. Set SENTINEL_API_KEY in Secrets.")
+        st.stop()
 
 
 # ─────────────────────────────────────────────────────────────
@@ -156,17 +190,16 @@ with st.sidebar:
 
     if st.button("Check connection", use_container_width=True):
         awake, msg = wake_and_check()
-        st.success(f"Connected ({msg}).") if awake else st.error(f"Could not reach the Space: {msg}")
+        if awake:
+            _is_live.clear()
+            st.success(f"Connected ({msg}).")
+        else:
+            st.error(f"Could not reach the Space: {msg}")
 
     st.divider()
     page = st.radio("Go to", ["The Story (start here)", "Deep Dive: Compliance Report", "Deep Dive: Onboard Your Own Model"])
     st.divider()
     st.caption("strataforge3.com")
-
-def require_key():
-    if not st.session_state.api_key:
-        st.warning("No API key configured. Set SENTINEL_API_KEY in Secrets.")
-        st.stop()
 
 
 # ═════════════════════════════════════════════════════════════
@@ -175,6 +208,7 @@ def require_key():
 
 if page == "The Story (start here)":
     require_key()
+    ensure_live()
 
     st.title("Watch Sentinel catch what a quieter failure would miss")
     st.markdown(
@@ -198,7 +232,7 @@ if page == "The Story (start here)":
 
     if "act1_result" in st.session_state:
         kind, ok, status, body = st.session_state["act1_result"]
-        if ok:
+        if ok and isinstance(body, dict) and "decision" in body:
             caught = body["decision"] == "FRAUD"
             cls = "reveal-caught" if caught else "reveal-clean"
             icon = "🚨 Flagged as fraud" if caught else "✅ Passed as legitimate"
@@ -206,7 +240,7 @@ if page == "The Story (start here)":
                 <span style="font-size:1.8rem;font-weight:700;">{body['fraud_probability']*100:.2f}%</span> fraud probability, live from the model
                 &nbsp;·&nbsp; decision threshold: {body['threshold_used']}</div>""", unsafe_allow_html=True)
         else:
-            st.error(f"Request failed: {body}")
+            st.error(friendly_error(status))
 
     st.markdown("""<div class="biz-callout">
         <b>What this means for a business:</b> this part — scoring a transaction — is what any fraud model already does.
@@ -234,32 +268,36 @@ if page == "The Story (start here)":
             "data": ref_data, "labels": [1 if random.random() < 0.02 else 0 for _ in ref_data],
             "display_name": "Investor Simulation",
         })
-        if ok:
+        if not ok:
+            status_box.error(friendly_error(status))
+        else:
             week_cols[0].markdown('<div class="week-cell week-ok">Baseline ✓</div>', unsafe_allow_html=True)
 
-        shifts = [0.04, 0.10, 0.20, 0.6]  # calibrated to climb OK -> WARNING -> WARNING -> CRITICAL
-        explain_text = None
-        for i, shift in enumerate(shifts):
-            status_box.info(f"Checking week {i+1} of production data…")
-            time.sleep(0.6)
-            batch = synth_batch(150, shift)
-            ok, status, body = api("POST", f"/tenants/{PUBLIC_TENANT}/drift/report", json={"transactions": batch})
-            if ok:
-                level = body.get("alert_level", "OK").lower()
-                week_cols[i+1].markdown(f'<div class="week-cell week-{level}">Week {i+1}<br>{body["alert_level"]}</div>', unsafe_allow_html=True)
-                if body.get("alert_level") in ("WARNING", "CRITICAL") and body.get("explanation", {}).get("summary"):
-                    explain_text = body["explanation"]["summary"]
-                if body.get("alert_level") == "CRITICAL":
-                    status_box.success(f"Alert fired at week {i+1}.")
+            shifts = [0.04, 0.10, 0.20, 0.6]  # calibrated to climb OK -> WARNING -> WARNING -> CRITICAL
+            explain_text = None
+            failed = False
+            for i, shift in enumerate(shifts):
+                status_box.info(f"Checking week {i+1} of production data…")
+                time.sleep(0.6)
+                batch = synth_batch(150, shift)
+                ok, status, body = api("POST", f"/tenants/{PUBLIC_TENANT}/drift/report", json={"transactions": batch})
+                if ok and isinstance(body, dict):
+                    level = body.get("alert_level", "OK").lower()
+                    week_cols[i+1].markdown(f'<div class="week-cell week-{level}">Week {i+1}<br>{body.get("alert_level", "OK")}</div>', unsafe_allow_html=True)
+                    if body.get("alert_level") in ("WARNING", "CRITICAL") and body.get("explanation", {}).get("summary"):
+                        explain_text = body["explanation"]["summary"]
+                    if body.get("alert_level") == "CRITICAL":
+                        status_box.success(f"Alert fired at week {i+1}.")
+                        break
+                else:
+                    status_box.error(friendly_error(status))
+                    failed = True
                     break
             else:
-                status_box.error(f"Request failed: {body}")
-                break
-        else:
-            status_box.success("Sequence complete.")
+                status_box.success("Sequence complete.")
 
-        if explain_text:
-            st.markdown(f'<div class="biz-callout" style="border-left-color:{ORANGE};"><b>Sentinel Explain:</b> {explain_text}</div>', unsafe_allow_html=True)
+            if explain_text and not failed:
+                st.markdown(f'<div class="biz-callout" style="border-left-color:{ORANGE};"><b>Sentinel Explain:</b> {explain_text}</div>', unsafe_allow_html=True)
 
     st.markdown("""<div class="biz-callout">
         <b>What this means for a business:</b> that alert is catching something an aggregate accuracy score would hide.
@@ -288,17 +326,22 @@ if page == "The Story (start here)":
             api("POST", f"/tenants/{BETA_TENANT}/drift/report", json={"transactions": synth_batch(200, 0.0)})
 
         col1, col2 = st.columns(2)
+        all_ok = True
         for col, tenant, label in [(col1, ALPHA_TENANT, "Alpha (drifted)"), (col2, BETA_TENANT, "Beta (untouched)")]:
             with col:
                 st.markdown(f"**{label}**")
                 ok, status, dash = api("GET", f"/tenants/{tenant}/dashboard")
                 ok2, status2, alerts = api("GET", f"/tenants/{tenant}/alerts")
-                if ok:
-                    color = "🟢" if dash["system_status"] == "HEALTHY" else "🔴"
-                    st.metric("Status", f"{color} {dash['system_status']}")
-                if ok2:
-                    st.caption(f"{alerts['total']} alert(s) logged")
-        st.success("Same run, seconds apart — zero cross-contamination.")
+                if ok and isinstance(dash, dict):
+                    color = "🟢" if dash.get("system_status") == "HEALTHY" else "🔴"
+                    st.metric("Status", f"{color} {dash.get('system_status', 'UNKNOWN')}")
+                else:
+                    all_ok = False
+                    st.error(friendly_error(status))
+                if ok2 and isinstance(alerts, dict):
+                    st.caption(f"{alerts.get('total', 0)} alert(s) logged")
+        if all_ok:
+            st.success("Same run, seconds apart — zero cross-contamination.")
 
     st.markdown("""<div class="biz-callout">
         <b>What this means for a business:</b> if you run several models — or you're a platform serving several
@@ -314,6 +357,7 @@ if page == "The Story (start here)":
 
 elif page == "Deep Dive: Compliance Report":
     require_key()
+    ensure_live()
     st.title("The paperwork, already done")
     st.write("Every check, every change, every deployment is written to a tamper-evident record and mapped to the specific regulation it serves as evidence for.")
 
@@ -322,7 +366,7 @@ elif page == "Deep Dive: Compliance Report":
     with c1:
         if st.button("Generate report", type="primary"):
             ok, status, body = api("GET", f"/compliance/report/{framework}")
-            if ok:
+            if ok and isinstance(body, dict):
                 st.metric("Total evidence records", body["total_evidence_records"])
                 st.metric("Chain integrity", "✅ Valid" if body["integrity"]["valid"] else "❌ BROKEN")
                 for art_id, section in body["sections"].items():
@@ -331,12 +375,16 @@ elif page == "Deep Dive: Compliance Report":
                             for ev in section["evidence"]:
                                 st.write(f"**{ev['timestamp']}** — {ev['summary']}")
             else:
-                st.error(f"Failed: {body}")
+                st.error(friendly_error(status))
     with c2:
         if st.button("Verify tamper-evidence chain"):
             ok, status, body = api("GET", "/compliance/verify")
-            if ok:
-                st.success(f"Chain valid — {body['records_verified']} records verified.") if body.get("valid") else st.error(f"CHAIN BROKEN: {body}")
+            if ok and isinstance(body, dict) and body.get("valid"):
+                st.success(f"Chain valid — {body['records_verified']} records verified.")
+            elif ok:
+                st.error("Chain verification failed.")
+            else:
+                st.error(friendly_error(status))
 
     st.markdown("""<div class="biz-callout">
         <b>What this means for a business:</b> "prove your monitoring is working" stops being a scramble through
@@ -351,6 +399,7 @@ elif page == "Deep Dive: Compliance Report":
 
 elif page == "Deep Dive: Onboard Your Own Model":
     require_key()
+    ensure_live()
     st.title("How fast a real customer actually integrates")
     st.write("A customer never hands over their model — just the scores it already produces. This is that exact first step.")
 
@@ -362,9 +411,14 @@ elif page == "Deep Dive: Onboard Your Own Model":
     if submitted:
         data = synth_batch(n)
         ok, status, body = api("POST", f"/tenants/{model_id}/reference", json={
-            "data": data, "labels": [1 if random.random() < 0.02 else 0 for _ in data], "display_name": display_name,
+            "data": data,
+            "labels": [1 if random.random() < 0.02 else 0 for _ in data],
+            "display_name": display_name,
         })
-        st.success(f"Registered `{model_id}` — {body['rows']} rows, {len(body['features'])} features.") if ok else st.error(f"Failed: {body}")
+        if ok and isinstance(body, dict):
+            st.success(f"Registered `{model_id}` — {body['rows']} rows, {len(body['features'])} features.")
+        else:
+            st.error(friendly_error(status))
 
     st.markdown("""<div class="biz-callout">
         <b>What this means for a business:</b> that's the entire integration — one API call with data the
