@@ -1,4 +1,4 @@
-# Sentinel Live Demo (Streamlit)
+# Payesh Live Demo (Streamlit)
 
 A click-through demo UI for investors/prospects, backed by **live calls**
 to your deployed HuggingFace Space — nothing in this app is mocked.
