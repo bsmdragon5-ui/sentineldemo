@@ -1,5 +1,5 @@
 """
-Sentinel — Investor Simulation (Streamlit)
+Payesh — Investor Simulation (Streamlit)
 =============================================================================
 A guided, narrated walkthrough of the real Sentinel API, built for showing
 investors or prospects exactly what happens and why it matters to a
@@ -38,7 +38,7 @@ WHITE       = "#f5f5fa"
 LOGO_PATH = Path(__file__).parent / "assets" / "strataforge3-logo-mark.png"
 
 st.set_page_config(
-    page_title="Sentinel — Live Investor Simulation",
+    page_title="Payesh — Live Investor Simulation",
     page_icon=str(LOGO_PATH) if LOGO_PATH.exists() else "🛰️",
     layout="wide",
 )
